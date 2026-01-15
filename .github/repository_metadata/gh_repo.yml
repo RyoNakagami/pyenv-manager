@@ -1,0 +1,13 @@
+meta-data:
+  repository_name: pyenv-manager
+  visibility: public
+  org-name: RyoNakagami
+  tag:
+    - command-line-tool
+    - cli-tool
+    - Python
+    - pyenv
+  description: |
+    A utility collection for managing pyenv installations
+  homepage: null
+  license: mit
