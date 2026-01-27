@@ -1,0 +1,82 @@
+#!/bin/bash
+# ------------------------------------------------
+# Script: pyenv-list
+# Author: Ryo Nakagami
+# Revised: 2026-01-27
+# Description:
+#       List up installable or installed Python versions via pyenv.
+#       By default, only shows simple installable versions
+#       (e.g., 3.10.0, 3.11.5) without special builds.
+#
+# Usage:
+#       pyenv-list [OPTION]...
+#
+# Options:
+#       -a           Display all installable versions
+#                    (includes dev, rc, and special builds)
+#       --installed  Show installed versions instead of installable
+#       -h, --help   Show this help message
+#
+# Examples:
+#       pyenv-list
+#           List standard installable Python versions
+#
+#       pyenv-list -a
+#           List all installable versions including anaconda,
+#           miniconda, pypy, etc.
+#
+#       pyenv-list --installed
+#           List installed Python versions
+#
+# Dependencies:
+#       - pyenv must be installed and available in PATH
+# ------------------------------------------------
+
+set -eu -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/docstring.sh"
+
+function main() {
+    local show_all=false
+    local show_installed=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -a)
+                show_all=true
+                shift
+                ;;
+            --installed)
+                show_installed=true
+                shift
+                ;;
+            -h|--help)
+                usage_helper "$0"
+                exit 0
+                ;;
+            *)
+                echo "Error: Unknown option '$1'" >&2
+                usage_helper "$0" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    # Check if pyenv is available
+    if ! command -v pyenv &>/dev/null; then
+        echo "Error: pyenv is not installed or not in PATH" >&2
+        exit 1
+    fi
+
+    if [[ "$show_installed" == true ]]; then
+        pyenv versions --bare
+    elif [[ "$show_all" == true ]]; then
+        pyenv install --list
+    else
+        # Show only standard version numbers (e.g., 3.10.0, 3.11.5)
+        pyenv install --list | grep -P "^\s+\d+\.\d+\.\d+$"
+    fi
+}
+
+main "$@"
