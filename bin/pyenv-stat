@@ -1,0 +1,313 @@
+#!/bin/bash
+# ------------------------------------------------
+# Script: pyenv-stat
+# Author: Ryo Nakagami
+# Revised: 2026-01-27
+# Description:
+#       Count Python version usage across .python-version files.
+#       Scans directories to find which pyenv versions are in use.
+#
+# Usage:
+#       pyenv-stat [OPTIONS]
+#
+# Options:
+#       -d DIR       Directory to search for .python-version files
+#                    (default: ~)
+#       -j, --json   Output in JSON format
+#       --with-path  Show repository paths for each version
+#       -v           Enable verbose output
+#       -h, --help   Show this help message
+#
+# Examples:
+#       pyenv-stat
+#           Count version usage in home directory
+#
+#       pyenv-stat -d /path/to/projects
+#           Count version usage in specific directory
+#
+#       pyenv-stat -j
+#           Output counts in JSON format
+#
+#       pyenv-stat --with-path
+#           Show paths for each version
+#
+#       pyenv-stat -j --with-path
+#           Output paths in JSON format
+#
+# Dependencies:
+#       - pyenv must be installed and available in PATH
+#       - fdfind (fd-find) must be installed
+#       - jq (optional, for pretty JSON output)
+# ------------------------------------------------
+
+set -eu -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/docstring.sh"
+
+# Colors (disabled if not a TTY)
+if [[ -t 1 ]]; then
+    GREEN='\033[0;32m'
+    BLUE='\033[0;34m'
+    YELLOW='\033[0;33m'
+    NC='\033[0m'
+else
+    GREEN=''
+    BLUE=''
+    YELLOW=''
+    NC=''
+fi
+
+usage() {
+    usage_helper "$0"
+    exit "${1:-0}"
+}
+
+check_command() {
+    if ! command -v "$1" &>/dev/null; then
+        echo "Error: Required command '$1' not found" >&2
+        exit 1
+    fi
+}
+
+verbose_msg() {
+    if [[ "$verbose" -eq 1 ]]; then
+        echo -e "${YELLOW}[INFO]${NC} $1" >&2
+    fi
+}
+
+get_max_length() {
+    local max=0
+    local item
+    for item in "$@"; do
+        [[ ${#item} -gt $max ]] && max=${#item}
+    done
+    echo "$max"
+}
+
+print_table_results() {
+    local max_length=$1
+    shift
+    local -n counts=$1
+
+    printf "%-${max_length}s %5s\n" "Version" "Count"
+    printf "%s\n" "$(printf '%*s' "$((max_length + 6))" '' | tr ' ' '-')"
+
+    for version in "${!counts[@]}"; do
+        printf "%s %d\n" "$version" "${counts[$version]}"
+    done | sort -V | while read -r version count; do
+        printf "${BLUE}%-${max_length}s${NC} ${GREEN}%5d${NC}\n" "$version" "$count"
+    done
+}
+
+print_paths_results() {
+    local -n paths_ref=$1
+    local -a sorted_versions
+
+    mapfile -t sorted_versions < <(printf '%s\n' "${!paths_ref[@]}" | sort -V)
+
+    for version in "${sorted_versions[@]}"; do
+        local paths="${paths_ref[$version]}"
+        if [[ -n "$paths" ]]; then
+            echo -e "${BLUE}${version}${NC}:"
+            echo "$paths" | tr '|' '\n' | sort | while read -r path; do
+                echo "  $path"
+            done
+        fi
+    done
+}
+
+output_json_counts() {
+    local -n counts=$1
+    local json="{"
+    local first=true
+
+    for version in "${!counts[@]}"; do
+        if [[ "$first" == true ]]; then
+            first=false
+        else
+            json+=","
+        fi
+        json+="\"$version\":${counts[$version]}"
+    done
+    json+="}"
+
+    if command -v jq &>/dev/null; then
+        echo "$json" | jq -S '.'
+    else
+        echo "$json"
+    fi
+}
+
+output_json_paths() {
+    local -n paths_ref=$1
+    local json="{"
+    local first=true
+
+    for version in "${!paths_ref[@]}"; do
+        local paths="${paths_ref[$version]}"
+        if [[ "$first" == true ]]; then
+            first=false
+        else
+            json+=","
+        fi
+
+        json+="\"$version\":["
+        if [[ -n "$paths" ]]; then
+            local path_first=true
+            while IFS= read -r path; do
+                if [[ "$path_first" == true ]]; then
+                    path_first=false
+                else
+                    json+=","
+                fi
+                json+="\"$path\""
+            done < <(echo "$paths" | tr '|' '\n' | sort)
+        fi
+        json+="]"
+    done
+    json+="}"
+
+    if command -v jq &>/dev/null; then
+        echo "$json" | jq -S '.'
+    else
+        echo "$json"
+    fi
+}
+
+main() {
+    local search_dir=~
+    local verbose=0
+    local json_output=false
+    local show_paths=false
+
+    # Handle long options before getopts
+    local -a args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --help)
+                usage
+                ;;
+            --json)
+                json_output=true
+                ;;
+            --with-path)
+                show_paths=true
+                ;;
+            *)
+                args+=("$arg")
+                ;;
+        esac
+    done
+    set -- "${args[@]}"
+
+    # Parse short options
+    while getopts "d:jvh" opt; do
+        case $opt in
+            d)
+                search_dir="$OPTARG"
+                if [[ ! -d "$search_dir" ]]; then
+                    echo "Error: Directory '$search_dir' does not exist" >&2
+                    exit 1
+                fi
+                ;;
+            j)
+                json_output=true
+                ;;
+            v)
+                verbose=1
+                verbose_msg "Verbose mode enabled"
+                ;;
+            h)
+                usage
+                ;;
+            ?)
+                usage 1
+                ;;
+        esac
+    done
+
+    verbose_msg "Using search directory: $search_dir"
+
+    # Validate requirements
+    check_command pyenv
+    check_command fdfind
+
+    # Get available Python versions
+    verbose_msg "Fetching Python versions from pyenv..."
+    local -a versions
+    mapfile -t versions < <(pyenv versions --bare)
+    if [[ ${#versions[@]} -eq 0 ]]; then
+        echo "No Python versions found in pyenv" >&2
+        exit 1
+    fi
+
+    # Find all .python-version files once (more efficient)
+    verbose_msg "Searching for .python-version files..."
+    local -a version_files
+    mapfile -t version_files < <(fdfind -t f -H -I --regex "^\.python-version$" "$search_dir" 2>/dev/null || true)
+    verbose_msg "Found ${#version_files[@]} .python-version files"
+
+    # Data structures
+    local -A version_counts
+    local -A version_paths
+    local total=0
+    local version
+
+    # Initialize
+    for version in "${versions[@]}"; do
+        version_counts[$version]=0
+        version_paths[$version]=""
+    done
+
+    # Collect data
+    if [[ ${#version_files[@]} -gt 0 ]]; then
+        for file in "${version_files[@]}"; do
+            local file_version
+            file_version=$(<"$file") || continue
+            file_version="${file_version%%[[:space:]]*}"  # Trim whitespace
+
+            if [[ -n "${version_counts[$file_version]+exists}" ]]; then
+                ((version_counts[$file_version]++)) || true
+                ((total++)) || true
+
+                # Store directory path
+                local dir_path
+                dir_path="$(dirname "$file")"
+                if [[ -z "${version_paths[$file_version]}" ]]; then
+                    version_paths[$file_version]="$dir_path"
+                else
+                    version_paths[$file_version]+="|$dir_path"
+                fi
+            fi
+        done
+    fi
+
+    for version in "${versions[@]}"; do
+        verbose_msg "Found ${version_counts[$version]} occurrences of $version"
+    done
+
+    # Output results
+    if [[ "$json_output" == true ]]; then
+        if [[ "$show_paths" == true ]]; then
+            output_json_paths version_paths
+        else
+            output_json_counts version_counts
+        fi
+    else
+        if [[ "$show_paths" == true ]]; then
+            print_paths_results version_paths
+        else
+            local max_length
+            max_length=$(get_max_length "${versions[@]}")
+            ((max_length += 2)) || true
+
+            print_table_results "$max_length" version_counts
+
+            echo
+            printf "%-${max_length}s %5d\n" "Total:" "$total"
+        fi
+    fi
+}
+
+main "$@"

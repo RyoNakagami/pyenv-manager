@@ -1,0 +1,218 @@
+#!/bin/bash
+# ------------------------------------------------
+# Script: pyenv-cleanup
+# Author: Ryo Nakagami
+# Revised: 2026-01-27
+# Description:
+#       Find and remove unused Python versions.
+#       Detects installed versions not referenced by any
+#       .python-version files in the search directory.
+#
+# Usage:
+#       pyenv-cleanup [OPTIONS]
+#
+# Options:
+#       -d DIR       Directory to search for .python-version files
+#                    (default: ~)
+#       -f, --force  Remove without confirmation
+#       --dry-run    Show what would be removed without actually removing
+#       -v           Enable verbose output
+#       -h, --help   Show this help message
+#
+# Examples:
+#       pyenv-cleanup
+#           Show unused versions and prompt for removal
+#
+#       pyenv-cleanup -d /path/to/projects
+#           Search specific directory for .python-version files
+#
+#       pyenv-cleanup --dry-run
+#           Show unused versions without removing
+#
+#       pyenv-cleanup -f
+#           Remove unused versions without confirmation
+#
+# Dependencies:
+#       - pyenv must be installed and available in PATH
+#       - fdfind (fd-find) must be installed
+# ------------------------------------------------
+
+set -eu -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/docstring.sh"
+
+# Colors (disabled if not a TTY)
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
+
+usage() {
+    usage_helper "$0"
+    exit "${1:-0}"
+}
+
+check_command() {
+    if ! command -v "$1" &>/dev/null; then
+        echo "Error: Required command '$1' not found" >&2
+        exit 1
+    fi
+}
+
+verbose_msg() {
+    if [[ "$verbose" -eq 1 ]]; then
+        echo -e "${YELLOW}[INFO]${NC} $1" >&2
+    fi
+}
+
+main() {
+    local search_dir=~
+    local verbose=0
+    local force=false
+    local dry_run=false
+
+    # Handle long options before getopts
+    local -a args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --help)
+                usage
+                ;;
+            --force)
+                force=true
+                ;;
+            --dry-run)
+                dry_run=true
+                ;;
+            *)
+                args+=("$arg")
+                ;;
+        esac
+    done
+    set -- "${args[@]}"
+
+    # Parse short options
+    while getopts "d:fvh" opt; do
+        case $opt in
+            d)
+                search_dir="$OPTARG"
+                if [[ ! -d "$search_dir" ]]; then
+                    echo "Error: Directory '$search_dir' does not exist" >&2
+                    exit 1
+                fi
+                ;;
+            f)
+                force=true
+                ;;
+            v)
+                verbose=1
+                verbose_msg "Verbose mode enabled"
+                ;;
+            h)
+                usage
+                ;;
+            ?)
+                usage 1
+                ;;
+        esac
+    done
+
+    verbose_msg "Using search directory: $search_dir"
+
+    # Validate requirements
+    check_command pyenv
+    check_command fdfind
+
+    # Get installed Python versions
+    verbose_msg "Fetching installed Python versions..."
+    local -a installed_versions
+    mapfile -t installed_versions < <(pyenv versions --bare)
+    if [[ ${#installed_versions[@]} -eq 0 ]]; then
+        echo "No Python versions installed via pyenv"
+        exit 0
+    fi
+    verbose_msg "Found ${#installed_versions[@]} installed versions"
+
+    # Find all .python-version files and collect used versions
+    verbose_msg "Searching for .python-version files..."
+    local -a version_files
+    mapfile -t version_files < <(fdfind -t f -H -I --regex "^\.python-version$" "$search_dir" 2>/dev/null || true)
+    verbose_msg "Found ${#version_files[@]} .python-version files"
+
+    # Collect used versions
+    local -A used_versions
+    if [[ ${#version_files[@]} -gt 0 ]]; then
+        for file in "${version_files[@]}"; do
+            local file_version
+            file_version=$(<"$file") || continue
+            file_version="${file_version%%[[:space:]]*}"  # Trim whitespace
+            used_versions[$file_version]=1
+        done
+    fi
+    verbose_msg "Found ${#used_versions[@]} unique versions in use"
+
+    # Find unused versions
+    local -a unused_versions=()
+    for version in "${installed_versions[@]}"; do
+        if [[ -z "${used_versions[$version]+exists}" ]]; then
+            unused_versions+=("$version")
+        fi
+    done
+
+    # Report results
+    if [[ ${#unused_versions[@]} -eq 0 ]]; then
+        echo -e "${GREEN}All installed versions are in use.${NC}"
+        exit 0
+    fi
+
+    echo -e "${YELLOW}Unused versions (not referenced by any .python-version):${NC}"
+    echo
+    for version in "${unused_versions[@]}"; do
+        echo -e "  ${RED}${version}${NC}"
+    done
+    echo
+    echo "Total: ${#unused_versions[@]} unused version(s)"
+    echo
+
+    # Dry run - just show, don't remove
+    if [[ "$dry_run" == true ]]; then
+        echo -e "${BLUE}[DRY RUN]${NC} No versions were removed."
+        exit 0
+    fi
+
+    # Confirm removal
+    if [[ "$force" != true ]]; then
+        echo -n "Remove these versions? [y/N] "
+        read -r response
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 0
+        fi
+    fi
+
+    # Remove unused versions
+    echo
+    for version in "${unused_versions[@]}"; do
+        echo -n "Removing $version... "
+        if pyenv uninstall -f "$version" 2>/dev/null; then
+            echo -e "${GREEN}done${NC}"
+        else
+            echo -e "${RED}failed${NC}"
+        fi
+    done
+
+    echo
+    echo -e "${GREEN}Cleanup complete.${NC}"
+}
+
+main "$@"
