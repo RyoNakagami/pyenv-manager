@@ -1,0 +1,5 @@
+name: pyenv-manager
+version: "0.1.0"
+description: "A utility collection for managing pyenv installations"
+author: "Ryo Nakagami"
+license: MIT
