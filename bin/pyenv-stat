@@ -15,6 +15,8 @@
 #                    (default: ~)
 #       -j, --json   Output in JSON format
 #       --with-path  Show repository paths for each version
+#       --su         Run as root without pyenv command
+#                    (scans /home/*/.pyenv/versions/ directly)
 #       -v           Enable verbose output
 #       -h, --help   Show this help message
 #
@@ -34,8 +36,11 @@
 #       pyenv-stat -j --with-path
 #           Output paths in JSON format
 #
+#       sudo pyenv-stat --su -d /home
+#           Run as root, scan all users
+#
 # Dependencies:
-#       - pyenv must be installed and available in PATH
+#       - pyenv must be installed and available in PATH (unless --su)
 #       - fdfind (fd-find) must be installed
 #       - jq (optional, for pretty JSON output)
 # ------------------------------------------------
@@ -83,6 +88,21 @@ get_max_length() {
         [[ ${#item} -gt $max ]] && max=${#item}
     done
     echo "$max"
+}
+
+# Get Python versions without pyenv command (for --su mode)
+get_versions_from_filesystem() {
+    local search_dir="$1"
+
+    # Find .pyenv/versions directories recursively, then list their contents
+    fdfind -t d -H -I '^versions$' "$search_dir" 2>/dev/null \
+        | grep '\.pyenv/versions' \
+        | while IFS= read -r versions_dir; do
+            fdfind -t d -H -I --max-depth 1 '.' "$versions_dir" 2>/dev/null
+        done \
+        | xargs -r -n1 basename \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -Vu
 }
 
 print_table_results() {
@@ -180,6 +200,7 @@ main() {
     local verbose=0
     local json_output=false
     local show_paths=false
+    local su_mode=false
 
     # Handle long options before getopts
     local -a args=()
@@ -193,6 +214,9 @@ main() {
                 ;;
             --with-path)
                 show_paths=true
+                ;;
+            --su)
+                su_mode=true
                 ;;
             *)
                 args+=("$arg")
@@ -230,15 +254,33 @@ main() {
     verbose_msg "Using search directory: $search_dir"
 
     # Validate requirements
-    check_command pyenv
     check_command fdfind
+    if [[ "$su_mode" != true ]]; then
+        check_command pyenv
+    fi
 
     # Get available Python versions
-    verbose_msg "Fetching Python versions from pyenv..."
     local -a versions
-    mapfile -t versions < <(pyenv versions --bare)
+    if [[ "$su_mode" == true ]]; then
+        # In --su mode, search for pyenv installations in /home (all users)
+        local pyenv_search_dir="/home"
+        verbose_msg "Fetching Python versions from filesystem (--su mode)..."
+        verbose_msg "Scanning pyenv installations in: $pyenv_search_dir"
+        mapfile -t versions < <(get_versions_from_filesystem "$pyenv_search_dir")
+    else
+        verbose_msg "Fetching Python versions from pyenv..."
+        mapfile -t versions < <(pyenv versions --bare)
+    fi
+
+    # Filter out empty elements
+    local -a filtered_versions=()
+    for v in "${versions[@]}"; do
+        [[ -n "$v" ]] && filtered_versions+=("$v")
+    done
+    versions=("${filtered_versions[@]}")
+
     if [[ ${#versions[@]} -eq 0 ]]; then
-        echo "No Python versions found in pyenv" >&2
+        echo "No Python versions found" >&2
         exit 1
     fi
 
